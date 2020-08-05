@@ -4,17 +4,22 @@
 import numpy as np 
 from matplotlib import pyplot as plt 
 
+DEBUG = False
+
 #number of taps used for channel ISI (including the main tap)
-CHANNEL_TAPS = 8 
+CHANNEL_TAPS = 4 
 
 #number of taps used by DFE to cancel ISI + main tap, there are DFE_TAPS -1 taps available to cancel postcursor ISI
-DFE_TAPS = 8 
+DFE_TAPS = 8
 
 #width of data to be serialized/deserialized by tx/rx
 DATA_WIDTH = 7
 
 #channel impulse response
-H = [1.0, 0.3, 0.2, 0.05, -0.05, -0.2, -0.3, 0.1]
+H = [1.0, 0.9, -0.5, 0.3, -0.2, 0, 0]
+
+#adaptation gain for each DFE coeffecient
+mu = DFE_TAPS * [0.01]
 
 #dfe tap coeffecients
 c = [0] * DFE_TAPS # DFE tap coeffecients
@@ -28,6 +33,11 @@ prev_d_rx = [0] * DFE_TAPS
 #to see coeffecient changes
 dfe = [[] for _ in range(DFE_TAPS)]
 
+#disable tap n from adapting if adapt[n] = 0
+adapt = [1] * DFE_TAPS;
+
+tx = [] #tx output
+rx = [] #post dfe rx output
 
 ## generates a prbs7 sequence using start as the input seed 
 ## output data width is 7 bits
@@ -91,7 +101,9 @@ def dfe_adapt_graph():
 		plt.plot(dfe[i])
 
 	plt.show()
-def sim(num_words=20, show=True, reset=False, seed=10, freeze_dfe=False, speculate_d0=False):
+def sim(num_words=20, show=False, reset=False, seed=10, freeze_dfe=False, speculate_d0=True):
+	global tx, rx
+
 	if reset: #resets the systems memory
 		reset_sys()
 
@@ -100,6 +112,7 @@ def sim(num_words=20, show=True, reset=False, seed=10, freeze_dfe=False, specula
 	pre_rx = [] #rx input
 	rx = [] #post dfe rx output
 	
+	bitcount = 0
 	count = 0
 	if speculate_d0:
 		d0_predict = 1
@@ -108,12 +121,19 @@ def sim(num_words=20, show=True, reset=False, seed=10, freeze_dfe=False, specula
 	while num_words != count:
 		## serialize 7 bit txdata and send it 
 		txdata_shift = txdata
-		if num_words % 5 == 0:
-			d0_predict = -d0_predict
+
 		for i in range(DATA_WIDTH):
+			if DEBUG:
+				print('bit #: ', bitcount)
+
 			txbit = txdata_shift & 0x1 
 			rxbit = send(txbit)
-			rxout = recv(rxbit, d0_predict)
+
+			if DEBUG:
+				print('tx sent data: ', 2*txbit-1)
+				print('data after ch:, ', rxbit)
+
+			rxout = recv(rxbit, 0)
 			rxd = rxout[0]
 			rxe = rxout[1]
 			txdata_shift = txdata_shift >> 1
@@ -123,6 +143,10 @@ def sim(num_words=20, show=True, reset=False, seed=10, freeze_dfe=False, specula
 
 			for i in range(DFE_TAPS):
 				dfe[i].append(c[i])
+
+			bitcount = bitcount + 1
+			if bitcount % 3 == 0:
+				d0_predict = -d0_predict
 
 		count = count + 1
 		txdata = prbs7(txdata)
@@ -141,7 +165,6 @@ def sign(n):
 		return -1
 
 def recv(rxin, d0_predict=0, freeze_dfe=False):
-	mu = 0.0005 #tap step size
 
 	#move all previous data in dfe delay line forward
 	for i in range(DFE_TAPS-1, 0, -1):
@@ -165,12 +188,25 @@ def recv(rxin, d0_predict=0, freeze_dfe=False):
 	rxe = rxd - prev_d_rx[0] * c[0];
 
 	#adapt dfe taps
+	#import pdb;pdb.set_trace();
+
+	if DEBUG:
+		print ('rx data: ', rxd)
+		print ('rx error', rxe)
+		print('adapt: ', d0_predict)
+
 	if sign(rxd) == prev_d_rx[0] and not freeze_dfe:
 		for i in range(DFE_TAPS):
-			c[i] = c[i] + mu*sign(rxe)*sign(prev_d_rx[i])
+			c[i] = c[i] + mu[i]*sign(rxe)*sign(prev_d_rx[i])*adapt[i]
+		#print('change')
+	else:
+		#print('no change')
+		pass
 
 	rxd_out = (sign(rxd))
 	rxe_out = (sign(rxe))
+
+	prev_d_rx[0] = sign(rxd)
 
 	return [rxd_out, rxe_out]
 
@@ -183,3 +219,11 @@ def dfe_response():
 	plt.stem(c)
 	plt.show();
 	pass
+
+def get_ber():
+	errors = 0
+	bits = len(tx) 
+	for i in range(len(tx)):
+		errors = errors + 1 * (tx[i] != rx[i])
+
+	return errors/bits
